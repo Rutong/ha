@@ -43,7 +43,8 @@ enum LMODE {
   LMODE_OFF = 0,
   LMODE_ON, //manual ON, 100% brightness
   LMODE_AUTO,  
-  LMODE_ALARM //100% brightness blinking 
+  LMODE_ALARM, //100% brightness blinking
+  LMODE_FULL_MANUAL //fully manual, mainly for testing
 };
 
 #define LOOP_DELAY_MS (20)
@@ -51,16 +52,14 @@ enum LMODE {
 #define PS_LOW_WM (200)
 #define PS_HIGH_WM (400)
 
-const unsigned char lvlR[LED_LEVELS] = {0,8,16,25,33,41,49,58,66,74,82,90,99,107,115,123,132,140,148,156,165,173,181,189,197,206,214,222,230,239,247,255};
+const unsigned char tbl_cree32[LED_LEVELS] = {0,8,16,25,33,41,49,58,66,74,82,90,99,107,115,123,132,140,148,156,165,173,181,189,197,206,214,222,230,239,247,255};
 
 
-LMODE vs = LMODE_AUTO; //Lighting MODE
+LMODE g_mode = LMODE_AUTO; //Lighting MODE
 unsigned char vr = 31; //LED brightness level
 
-unsigned char slvl = -1; //latest PIR sensor level
-
-unsigned char clr = 0; //LED brightness: current (raw)
-unsigned char tlr = 0; //LED brightness: target (raw)
+float clr = 0; //LED brightness: current (raw)
+float tlr = 0; //LED brightness: target (raw)
 
 unsigned int pir_lock_remain = 0;
 
@@ -103,7 +102,6 @@ char * getCmd(){
       return cmdBuffer + 1;         
     }
     else {
-      hs_printf("HAD:bad command: %s\n", cmdBuffer);
       clearCmd();
       return 0;
     }
@@ -115,27 +113,24 @@ char * getCmd(){
 
 void processCmd (char * cmd){
   unsigned char s,r,g,b;
-
-  hs_printf("command: %s\n", cmd);
-
   switch (cmd[0]){
-  case 's':
-    sscanf(cmd, "s %u", &s);
-    //update(s, vr, vg, vb);
+  case 'm':
+    sscanf(cmd, "m %u", &s);
+    g_mode = (LMODE)s;
     break;
   case 'c':
     sscanf(cmd, "c %u %u %u", &r, &g, &b);
     //update(vs, r, g, b); 
     break;
   case 'i':
-    //update(vs, vr, vg, vb); 
+    print_info(); 
     break;
 
   default:
     break;
   }
   clearCmd();
-
+  
 }
 
 //sensor checker
@@ -145,7 +140,7 @@ int check_pir() {
     pir_lock_remain = PIR_LOCK_PERIOD;
   }  
   else {
-    if (PIR_LOCK_PERIOD == 0) {
+    if (pir_lock_remain == 0) {
       return 0;
     }
     else {
@@ -174,18 +169,38 @@ int check_photores() {
   return 1;
 }
 
-//control functions
-void update_light(){
-  if(tlr>clr){
-    clr+=1;
-    analogWrite(PIN_3WCREE, clr);  
+//led control functions
+void light_update(){
+  if(tlr==clr){
+    return;
   }
-  else if (tlr<clr){
-    clr-=1;
-    analogWrite(PIN_3WCREE, clr);     
+  if(tlr>clr+1){
+    clr+=(tlr-clr)*0.05f;
+  }
+  else if(tlr>clr){
+    clr=tlr;
+  }
+  else if (tlr<clr-1){
+    clr-=(clr-tlr)*0.05f;
   } 
+  else if (tlr<clr){
+    clr=tlr; 
+  } 
+  analogWrite(PIN_3WCREE, (int)clr);
 }
 
+void light_set_brightness(unsigned int lvl) {
+  if (lvl >= LED_LEVELS ) lvl = LED_LEVELS - 1;
+  tlr = (float)tbl_cree32[lvl];
+}
+
+
+void print_info(){
+  int vphoto = analogRead(PIN_PHOTORES);
+  float celsius = dht.readTemperature(); 
+  bool pir = digitalRead(PIN_PIR) ;
+  hs_printf("ok %u,%u,%u,%u\n",g_mode,pir,vphoto,(int)celsius*10);
+}
 //void update(unsigned char s,unsigned char r,unsigned char g,unsigned char b){
 //
 //  int v_raw;
@@ -233,24 +248,24 @@ void setup()
   
   digitalWrite(PIN_ONBOARDLED, LOW);  
   analogWrite(PIN_3WCREE, 0);  
-
-  Serial.println("OK");  
   
   // test CREE
   for(i=0;i<32;i++){
-    analogWrite(PIN_3WCREE, lvlR[i]);   
+    analogWrite(PIN_3WCREE, tbl_cree32[i]);   
     delay(10); 
   }
   for(i=31;i>=0;i--){
-    analogWrite(PIN_3WCREE, lvlR[i]);   
+    analogWrite(PIN_3WCREE, tbl_cree32[i]);   
     delay(10); 
   }
+  print_info();
  
 }
 
 void loop() // run over and over
 {
   char * ssCmd;
+  static int alarmv = 0;
   
   //check command
   ssCmd = getCmd();
@@ -258,7 +273,41 @@ void loop() // run over and over
     processCmd(ssCmd);
   }
   
-  update_light();
+  switch(g_mode) {
+    case LMODE_OFF:
+    light_set_brightness(0);    
+    break;
+
+    case LMODE_ON:
+    light_set_brightness(LED_LEVELS-1);    
+    break; 
+    
+    case LMODE_ALARM:
+    if(alarmv>10){
+      analogWrite(PIN_3WCREE, 255);
+      alarmv=0;
+    }
+    else{
+      analogWrite(PIN_3WCREE, 0);
+      alarmv++;
+    }
+    break;
+
+    case LMODE_AUTO:
+      if(!check_photores()){
+        if(check_pir()){
+          light_set_brightness(LED_LEVELS-1);   
+        }
+        else{  
+          light_set_brightness(3);
+        }
+      }
+      else{
+        light_set_brightness(0);
+      }
+    break;
+  }
+  light_update();
   delay(20); 
 }
 
