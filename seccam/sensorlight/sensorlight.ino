@@ -24,66 +24,53 @@
  HAD:ok 1,0,15,0,0
  
  */
-
-#include <stdarg.h>
-#include <stdio.h>
-#include <DHT.h>
 #include <Boards.h>
-
+#include <stdio.h>
+#include <stdarg.h>
+#include <DHT.h>
 
 #define LED_LEVELS 32
 #define CMD_LEN_MAX 32
 
+//pin define
+#define PIN_DHT11 2 //IN digital
+#define PIN_ONBOARDLED 13 //OUT PWM
+#define PIN_3WCREE 9 //OUT PWM
+#define PIN_PHOTORES A0 //IN analog
+#define PIN_PIR 7 //IN digital
 
-//pin mapping
-#define DHT11Pin 2
-#define OnboardLEDPin 13
-#define PhotoResPin A0
+enum LMODE {
+  LMODE_OFF = 0,
+  LMODE_ON, //manual ON, 100% brightness
+  LMODE_AUTO,  
+  LMODE_ALARM //100% brightness blinking 
+};
+
+#define LOOP_DELAY_MS (20)
+#define PIR_LOCK_PERIOD  (1000) // 1000ms / 20ms * 20
+#define PS_LOW_WM (200)
+#define PS_HIGH_WM (400)
+
+const unsigned char lvlR[LED_LEVELS] = {0,8,16,25,33,41,49,58,66,74,82,90,99,107,115,123,132,140,148,156,165,173,181,189,197,206,214,222,230,239,247,255};
 
 
-DHT dht(DHT11Pin, DHT11);
+LMODE vs = LMODE_AUTO; //Lighting MODE
+unsigned char vr = 31; //LED brightness level
 
-int ledR = 9;  //PWM
-int ledG = 5;  //PWM  
-int ledB = 3;  //PWM
-int sensor = 7;
+unsigned char slvl = -1; //latest PIR sensor level
 
-unsigned char vs = 2;
-unsigned char vr = 31;
-unsigned char vg = 31;
-unsigned char vb = 31;
+unsigned char clr = 0; //LED brightness: current (raw)
+unsigned char tlr = 0; //LED brightness: target (raw)
 
-unsigned char slvl = -1;
+unsigned int pir_lock_remain = 0;
 
-
-unsigned char clr = 0,clg = 0,clb = 0;
-unsigned char tlr = 0,tlg = 0,tlb = 0;
-
-const unsigned char lvlR[LED_LEVELS] = {
-  0,8,16,25,33,41,49,58,66,74,82,90,99,107,115,123,132,140,148,156,165,173,181,189,197,206,214,222,230,239,247,255};
-const unsigned char lvlG[LED_LEVELS] = {
-  0,2,3,5,6,8,10,11,13,15,16,18,19,21,23,24,26,27,29,31,32,34,35,37,39,40,42,44,45,47,48,50};
-const unsigned char lvlB[LED_LEVELS] = {
-  0,2,5,7,9,11,14,16,18,20,23,25,27,29,32,34,36,38,41,43,45,47,50,52,54,56,59,61,63,65,68,70};
-int fadeValue = 0;
-
-char cmdBuffer[CMD_LEN_MAX] = {
-  0};
+char cmdBuffer[CMD_LEN_MAX] = {0};
 int cmdLen = 0;
 
+//create dht
+DHT dht(PIN_DHT11, DHT11);
 
-void fadeled(){
-  if(tlr>clr){
-    clr+=1;
-    analogWrite(ledR, clr);  
-  }
-  else {
-    clr-=1;
-    analogWrite(ledR, clr);     
-  } 
-}
-
-
+//utility functions
 void hs_printf(char *fmt, ... ){
   char tmp[64]; // resulting string limited to 64 chars
   va_list args;
@@ -93,11 +80,11 @@ void hs_printf(char *fmt, ... ){
   Serial.print(tmp);
 }
 
+//serial command processing functions
 void clearCmd(){
   memset(cmdBuffer,0,CMD_LEN_MAX);
   cmdLen = 0;
 }
-
 
 char * getCmd(){
   char tmp;
@@ -126,39 +113,6 @@ char * getCmd(){
   } 
 }
 
-void update(unsigned char s,unsigned char r,unsigned char g,unsigned char b){
-
-  int v_raw;
-  
-  if (r >= LED_LEVELS ) r = LED_LEVELS - 1;
-  if (g >= LED_LEVELS ) g = LED_LEVELS - 1;
-  if (b >= LED_LEVELS ) b = LED_LEVELS - 1;
-  if (s >= 3 ) s = 2;
-
-  vs = s;
-  vr = r;
-  vg = g;
-  vb = b;
-
-  if((vs == 1) || (vs == 2 && slvl == HIGH)) {
-    tlr = lvlR[vr];   
-    analogWrite(ledG, lvlG[vg]);     
-    analogWrite(ledB, lvlB[vb]);
-    digitalWrite(OnboardLEDPin, HIGH); 
-  }
-  else{
-    tlr = lvlR[5];  
-    analogWrite(ledG, lvlG[0]);     
-    analogWrite(ledB, lvlB[0]);
-    digitalWrite(OnboardLEDPin, LOW); 
-  }
-  
-  v_raw = analogRead(PhotoResPin);
-  float celsius = dht.readTemperature();
-  
-  hs_printf("HAD:ok %u,%u,%u,%u,%u,%u,%u\n",s,slvl,r,g,b,v_raw, (int)celsius*10);
-}
-
 void processCmd (char * cmd){
   unsigned char s,r,g,b;
 
@@ -167,14 +121,14 @@ void processCmd (char * cmd){
   switch (cmd[0]){
   case 's':
     sscanf(cmd, "s %u", &s);
-    update(s, vr, vg, vb);
+    //update(s, vr, vg, vb);
     break;
   case 'c':
     sscanf(cmd, "c %u %u %u", &r, &g, &b);
-    update(vs, r, g, b); 
+    //update(vs, r, g, b); 
     break;
   case 'i':
-    update(vs, vr, vg, vb); 
+    //update(vs, vr, vg, vb); 
     break;
 
   default:
@@ -184,6 +138,87 @@ void processCmd (char * cmd){
 
 }
 
+//sensor checker
+// return: 0 -> inactive, 1 -> active
+int check_pir() {
+  if(digitalRead(PIN_PIR) == HIGH) {
+    pir_lock_remain = PIR_LOCK_PERIOD;
+  }  
+  else {
+    if (PIR_LOCK_PERIOD == 0) {
+      return 0;
+    }
+    else {
+      pir_lock_remain--;
+    }
+  } 
+  return 1; 
+}
+
+// return 0 -> dark, 1 -> light
+int check_photores() {
+  int v_raw = analogRead(PIN_PHOTORES);
+  static bool low = false;
+  if(v_raw<PS_LOW_WM) {
+    low = true;
+    return 0;
+  }
+  else if(v_raw<PS_HIGH_WM){
+    if(low == true){
+      return 0;
+    }
+  }
+  else if(v_raw>=PS_HIGH_WM){
+    low = false;
+  }
+  return 1;
+}
+
+//control functions
+void update_light(){
+  if(tlr>clr){
+    clr+=1;
+    analogWrite(PIN_3WCREE, clr);  
+  }
+  else if (tlr<clr){
+    clr-=1;
+    analogWrite(PIN_3WCREE, clr);     
+  } 
+}
+
+//void update(unsigned char s,unsigned char r,unsigned char g,unsigned char b){
+//
+//  int v_raw;
+//  
+//  if (r >= LED_LEVELS ) r = LED_LEVELS - 1;
+//  if (g >= LED_LEVELS ) g = LED_LEVELS - 1;
+//  if (b >= LED_LEVELS ) b = LED_LEVELS - 1;
+//  if (s >= 3 ) s = 2;
+//
+//  vs = s;
+//  vr = r;
+//  vg = g;
+//  vb = b;
+//
+//  if((vs == 1) || (vs == 2 && slvl == HIGH)) {
+//    tlr = lvlR[vr];   
+//    analogWrite(ledG, lvlG[vg]);     
+//    analogWrite(ledB, lvlB[vb]);
+//    digitalWrite(OnboardLEDPin, HIGH); 
+//  }
+//  else{
+//    tlr = lvlR[5];  
+//    analogWrite(ledG, lvlG[0]);     
+//    analogWrite(ledB, lvlB[0]);
+//    digitalWrite(OnboardLEDPin, LOW); 
+//  }
+//  
+//  v_raw = analogRead(PhotoResPin);
+//  float celsius = dht.readTemperature();
+//  
+//  hs_printf("HAD:ok %u,%u,%u,%u,%u,%u,%u\n",s,slvl,r,g,b,v_raw, (int)celsius*10);
+//}
+
 void setup()  
 {
   int i;
@@ -192,62 +227,30 @@ void setup()
   dht.begin();
 
   //set pin modes
-  pinMode(sensor, INPUT); 
-  pinMode(OnboardLEDPin, OUTPUT); 
-  digitalWrite(OnboardLEDPin, LOW);  
-
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for Leonardo only
-  }
+  pinMode(PIN_PIR, INPUT); 
+  pinMode(PIN_3WCREE, OUTPUT); 
+  pinMode(PIN_ONBOARDLED, OUTPUT);   
+  
+  digitalWrite(PIN_ONBOARDLED, LOW);  
+  analogWrite(PIN_3WCREE, 0);  
 
   Serial.println("OK");  
   
-  // test led
+  // test CREE
   for(i=0;i<32;i++){
-    analogWrite(ledR, lvlR[i]);   
+    analogWrite(PIN_3WCREE, lvlR[i]);   
     delay(10); 
   }
-  for(i=31;i>=1;i--){
-    analogWrite(ledR, lvlR[i]);   
+  for(i=31;i>=0;i--){
+    analogWrite(PIN_3WCREE, lvlR[i]);   
     delay(10); 
   }
-  for(i=0;i<32;i++){
-    analogWrite(ledG, lvlG[i]);   
-    delay(10); 
-  }
-  for(i=31;i>=1;i--){
-    analogWrite(ledG, lvlG[i]);   
-    delay(10); 
-  }
-  for(i=0;i<32;i++){
-    analogWrite(ledB, lvlB[i]);   
-    delay(10); 
-  }
-  for(i=31;i>=1;i--){
-    analogWrite(ledB, lvlB[i]);   
-    delay(10); 
-  }
-  
-  //set initial LED level
-  for(i=0;i<vr;i++){
-    analogWrite(ledR, lvlR[i]);   
-    analogWrite(ledG, lvlG[i]);     
-    analogWrite(ledB, lvlB[i]);  
-    delay(10); 
-  }
+ 
 }
 
 void loop() // run over and over
 {
   char * ssCmd;
-  
-  //check sensor value
-  if(slvl != digitalRead(sensor)){
-    slvl = digitalRead(sensor);
-    if (vs == 2){
-      update(vs, vr, vg, vb);
-    }
-  }
   
   //check command
   ssCmd = getCmd();
@@ -255,7 +258,7 @@ void loop() // run over and over
     processCmd(ssCmd);
   }
   
-  fadeled();
+  update_light();
   delay(20); 
 }
 
