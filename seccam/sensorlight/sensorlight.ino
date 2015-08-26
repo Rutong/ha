@@ -286,11 +286,13 @@ void loop() // run over and over
   
   switch(currMode) {
     case LMODE_OFF:
-      light_set_brightness(0);    
+      light_set_brightness(0); 
+      light_update();
     break;
 
     case LMODE_ON:
-      light_set_brightness(LED_LEVELS-1);    
+      light_set_brightness(LED_LEVELS-1);
+      light_update();  
     break; 
     
     case LMODE_ALARM:
@@ -319,10 +321,9 @@ void loop() // run over and over
       else{
         light_set_brightness(0);
       }
+      light_update();
     break;
   }
-  
-  light_update();
   delay(LOOP_DELAY_MS); 
 }
 
