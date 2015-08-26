@@ -2,26 +2,21 @@
  Command scheme:
  #<command char> <arg0> <arg1>....$
  Example:
- #c 15 0 0$
+ #s 2$
  
  Command list:
  
  [ON/OFF/AUTO]
- #s <0:OFF/1:ON/2:AUTO>
+ #s <0:OFF/1:ON/2:AUTO/3:ALARM/4:FULL MANUAL>
  Example(turn ON):
  #s 1$
- 
- [SET COLOR]
- #c <R> <G> <B>
- Example(Red light):
- #c 15 0 0$
  
  [GET STATUS]
  #i$
  Returns:
- >ok <ON/OFF/AUTO>,<SENSOR LEVEL>,<R>,<G>,<B>
+ >ok <MODE>,<SENSOR LEVEL>,<PHOTO RESISTOR>,<TEMPERATUREx10>
  Example:
- HAD:ok 1,0,15,0,0
+ 2,1,345,450\n
  
  */
 #include <Boards.h>
@@ -52,22 +47,29 @@ enum LMODE {
 #define PS_LOW_WM (200)
 #define PS_HIGH_WM (400)
 
+#define TS_CHECK_INTERVAL (1500) // 1000ms / 20ms * 30
+#define ALARM_LIMIT (3000) // 1000ms / 20ms * 60
+
 const unsigned char tbl_cree32[LED_LEVELS] = {0,8,16,25,33,41,49,58,66,74,82,90,99,107,115,123,132,140,148,156,165,173,181,189,197,206,214,222,230,239,247,255};
 
+LMODE currMode = LMODE_AUTO; //Lighting MODE
+LMODE prevMode = LMODE_FULL_MANUAL; //Lighting MODE
 
-LMODE g_mode = LMODE_AUTO; //Lighting MODE
-unsigned char vr = 31; //LED brightness level
+int prevPIR = -1;
+int prevPHRE = -1;
+int prevTEMP = -1;
+
+int currPIR, currPHRE, currTEMP;
 
 float clr = 0; //LED brightness: current (raw)
 float tlr = 0; //LED brightness: target (raw)
-
-unsigned int pir_lock_remain = 0;
 
 char cmdBuffer[CMD_LEN_MAX] = {0};
 int cmdLen = 0;
 
 //create dht
 DHT dht(PIN_DHT11, DHT11);
+
 
 //utility functions
 void hs_printf(char *fmt, ... ){
@@ -116,14 +118,13 @@ void processCmd (char * cmd){
   switch (cmd[0]){
   case 'm':
     sscanf(cmd, "m %u", &s);
-    g_mode = (LMODE)s;
+    currMode = (LMODE)s;
     break;
-  case 'c':
-    sscanf(cmd, "c %u %u %u", &r, &g, &b);
-    //update(vs, r, g, b); 
+  case 'r':
+    print_raw_values(); 
     break;
   case 'i':
-    print_info(); 
+    print_info_values(); 
     break;
 
   default:
@@ -133,9 +134,10 @@ void processCmd (char * cmd){
   
 }
 
-//sensor checker
+//sensors
 // return: 0 -> inactive, 1 -> active
 int check_pir() {
+  static unsigned int pir_lock_remain = 0;
   if(digitalRead(PIN_PIR) == HIGH) {
     pir_lock_remain = PIR_LOCK_PERIOD;
   }  
@@ -194,45 +196,17 @@ void light_set_brightness(unsigned int lvl) {
   tlr = (float)tbl_cree32[lvl];
 }
 
-
-void print_info(){
+//reporting
+void print_raw_values(){
   int vphoto = analogRead(PIN_PHOTORES);
   float celsius = dht.readTemperature(); 
   bool pir = digitalRead(PIN_PIR) ;
-  hs_printf("ok %u,%u,%u,%u\n",g_mode,pir,vphoto,(int)celsius*10);
+  hs_printf("raw %u %u %u %u\n",currMode,pir,vphoto,(int)celsius*10);
 }
-//void update(unsigned char s,unsigned char r,unsigned char g,unsigned char b){
-//
-//  int v_raw;
-//  
-//  if (r >= LED_LEVELS ) r = LED_LEVELS - 1;
-//  if (g >= LED_LEVELS ) g = LED_LEVELS - 1;
-//  if (b >= LED_LEVELS ) b = LED_LEVELS - 1;
-//  if (s >= 3 ) s = 2;
-//
-//  vs = s;
-//  vr = r;
-//  vg = g;
-//  vb = b;
-//
-//  if((vs == 1) || (vs == 2 && slvl == HIGH)) {
-//    tlr = lvlR[vr];   
-//    analogWrite(ledG, lvlG[vg]);     
-//    analogWrite(ledB, lvlB[vb]);
-//    digitalWrite(OnboardLEDPin, HIGH); 
-//  }
-//  else{
-//    tlr = lvlR[5];  
-//    analogWrite(ledG, lvlG[0]);     
-//    analogWrite(ledB, lvlB[0]);
-//    digitalWrite(OnboardLEDPin, LOW); 
-//  }
-//  
-//  v_raw = analogRead(PhotoResPin);
-//  float celsius = dht.readTemperature();
-//  
-//  hs_printf("HAD:ok %u,%u,%u,%u,%u,%u,%u\n",s,slvl,r,g,b,v_raw, (int)celsius*10);
-//}
+
+void print_info_values(){
+  hs_printf("info %u %u %u %u\n",currMode,currPIR,currPHRE,currTEMP);
+}
 
 void setup()  
 {
@@ -257,15 +231,16 @@ void setup()
   for(i=31;i>=0;i--){
     analogWrite(PIN_3WCREE, tbl_cree32[i]);   
     delay(10); 
-  }
-  print_info();
- 
+  } 
 }
 
 void loop() // run over and over
 {
   char * ssCmd;
   static int alarmv = 0;
+  static int alarml = 0;
+  static unsigned int looper = 0;
+  bool needToReport = false;
   
   //check command
   ssCmd = getCmd();
@@ -273,29 +248,68 @@ void loop() // run over and over
     processCmd(ssCmd);
   }
   
-  switch(g_mode) {
+  //check sensors
+  currPIR = check_pir();
+  currPHRE = check_photores();
+  
+  //only read temperature every TS_CHECK_INTERVAL loops
+  if(looper++ == 0) {
+    currTEMP = (int) (dht.readTemperature() * 10);
+  }
+  if(looper >=TS_CHECK_INTERVAL){
+    looper = 0;
+  }
+  
+  if(currPIR != prevPIR) {
+    prevPIR = currPIR;
+    needToReport = true;
+  }
+  if(currPHRE != prevPHRE) {
+    prevPHRE = currPHRE;
+    needToReport = true;
+  }
+  if(currTEMP != prevTEMP) {
+    prevTEMP = currTEMP;
+    needToReport = true;
+  }
+  
+  if(prevMode != currMode) {
+    prevMode = currMode;
+    alarml = 0;
+    needToReport = true;
+  }
+  
+  if(needToReport) {
+    needToReport = false;
+    print_info_values();
+  }
+  
+  switch(currMode) {
     case LMODE_OFF:
-    light_set_brightness(0);    
+      light_set_brightness(0);    
     break;
 
     case LMODE_ON:
-    light_set_brightness(LED_LEVELS-1);    
+      light_set_brightness(LED_LEVELS-1);    
     break; 
     
     case LMODE_ALARM:
-    if(alarmv>10){
-      analogWrite(PIN_3WCREE, 255);
-      alarmv=0;
-    }
-    else{
-      analogWrite(PIN_3WCREE, 0);
-      alarmv++;
-    }
+      if(alarmv>5){
+        analogWrite(PIN_3WCREE, 255);
+        alarmv=0;
+      }
+      else{
+        analogWrite(PIN_3WCREE, 0);
+        alarmv++;
+      }
+      if( alarml++ >= ALARM_LIMIT) {
+        currMode = LMODE_AUTO;
+      }
     break;
 
     case LMODE_AUTO:
-      if(!check_photores()){
-        if(check_pir()){
+      if(!currPHRE){
+        if(currPIR){
           light_set_brightness(LED_LEVELS-1);   
         }
         else{  
@@ -307,7 +321,8 @@ void loop() // run over and over
       }
     break;
   }
+  
   light_update();
-  delay(20); 
+  delay(LOOP_DELAY_MS); 
 }
 
