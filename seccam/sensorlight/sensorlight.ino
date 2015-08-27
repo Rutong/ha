@@ -312,7 +312,13 @@ void loop() // run over and over
     case LMODE_AUTO:
       if(!currPHRE){
         if(currPIR){
-          light_set_brightness(LED_LEVELS-1);   
+          //limit LED power when system is too hot
+          if(currTEMP>480) {
+            light_set_brightness(LED_LEVELS/2);
+          }
+          else {
+            light_set_brightness(LED_LEVELS-1);
+          }
         }
         else{  
           light_set_brightness(3);
