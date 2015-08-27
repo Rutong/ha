@@ -201,7 +201,7 @@ void print_raw_values(){
   int vphoto = analogRead(PIN_PHOTORES);
   float celsius = dht.readTemperature(); 
   bool pir = digitalRead(PIN_PIR) ;
-  hs_printf("raw %u %u %u %u\n",currMode,pir,vphoto,(int)celsius*10);
+  hs_printf("raw %u %u %u %u %u %u\n",currMode,pir,vphoto,(int)celsius*10, (int)clr, (int)tlr);
 }
 
 void print_info_values(){
@@ -298,10 +298,12 @@ void loop() // run over and over
     case LMODE_ALARM:
       if(alarmv>5){
         analogWrite(PIN_3WCREE, 255);
+        clr = 255;
         alarmv=0;
       }
       else{
         analogWrite(PIN_3WCREE, 0);
+        clr = 0;
         alarmv++;
       }
       if( alarml++ >= ALARM_LIMIT) {
